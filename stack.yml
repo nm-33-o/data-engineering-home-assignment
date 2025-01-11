@@ -1,48 +1,197 @@
-AWSTemplateFormatVersion: "2010-09-09"
-Description: CloudFormation template to create a Lambda function that prints "Hello, World!".
+AWSTemplateFormatVersion: '2010-09-09'
+
+Parameters:
+  GlueBucketName:
+    Type: String
+    Default: "data-engineer-assignment-orib"
 
 Resources:
-    LambdaExecutionRole:
-        Type: "AWS::IAM::Role"
-        Properties:
-            AssumeRolePolicyDocument:
-                Version: "2012-10-17"
-                Statement:
-                    - Effect: "Allow"
-                      Principal:
-                          Service:
-                              - "lambda.amazonaws.com"
-                      Action: "sts:AssumeRole"
-            Policies:
-                - PolicyName: "LambdaExecutionPolicy"
-                  PolicyDocument:
-                      Version: "2012-10-17"
-                      Statement:
-                          - Effect: "Allow"
-                            Action:
-                                - "logs:CreateLogGroup"
-                                - "logs:CreateLogStream"
-                                - "logs:PutLogEvents"
-                            Resource: "arn:aws:logs:*:*:*"
+  GlueRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: 'AWSGlueServiceRoleDefaultorib'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service: 'glue.amazonaws.com'
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: 'AmazonS3RestrictedAccessPolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action:
+                  - 's3:ListBucket'
+                  - 's3:GetObject'
+                  - 's3:PutObject'
+                  - 's3:DeleteObject'
+                Resource:
+                  - !Sub 'arn:aws:s3:::${GlueBucketName}/*'
+                  - !Sub 'arn:aws:s3:::${GlueBucketName}'
+        - PolicyName: 'AWSGlueDataCatalogPolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action:
+                  - 'glue:CreateTable'
+                  - 'glue:UpdateTable'
+                  - 'glue:GetTable'
+                  - 'glue:GetTables'
+                  - 'glue:GetDatabase'
+                  - 'glue:CreateDatabase'
+                Resource:
+                  - !Sub 'arn:aws:glue:*:*:catalog'
+                  - !Sub 'arn:aws:glue:*:*:database/*'
+                  - !Sub 'arn:aws:glue:*:*:table/*'
+        - PolicyName: 'CloudWatchLogsPolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: '*'
 
-    HelloWorldLambda:
-        Type: "AWS::Lambda::Function"
-        Properties:
-            FunctionName: "HelloWorldFunction"
-            Handler: "index.handler"
-            Role: !GetAtt LambdaExecutionRole.Arn
-            Runtime: "python3.9"
-            Code:
-                ZipFile: |
-                    def handler(event, context):
-                        print("Hello, World!")
-            Timeout: 30
-            MemorySize: 128
+  GlueDatabase:
+    Type: 'AWS::Glue::Database'
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: 'stocks_data'
+        Description: 'Database for stocks data'
+
+  GlueCrawler:
+    Type: 'AWS::Glue::Crawler'
+    Properties:
+      Name: 'glue-crawler-assignment-orib'
+      Role: !GetAtt GlueRole.Arn
+      DatabaseName: 'stocks_data'
+      Targets:
+        S3Targets:
+          - Path: !Sub 's3://${GlueBucketName}/res'
+
+  GlueJob:
+    Type: 'AWS::Glue::Job'
+    Properties:
+      Name: 'glue-job-assignment-orib'
+      Command:
+        Name: 'glueetl'
+        ScriptLocation: !Sub 's3://${GlueBucketName}/glue-job-ori.py'
+      Role: !GetAtt GlueRole.Arn
+      DefaultArguments:
+        --job-bookmark-option: job-bookmark-disable
+        --enable-glue-datacatalog: true
+        --bucket_path: !Sub 's3://${GlueBucketName}/'
+        --input_prefix: stocks_data.csv
+        --avg_return_prefix: res/avg_return
+        --most_traded_prefix: res/most_traded
+        --volatile_prefix: res/volatile
+        --top_30_days_return_prefix: res/top_30_days_return
+      GlueVersion: '5.0' 
+      WorkerType: 'G.1X'
+      NumberOfWorkers: 2
+
+  AvgReturnGlueTable:
+    Type: 'AWS::Glue::Table'
+    DependsOn: GlueDatabase
+    Properties:
+      CatalogId: !Ref "AWS::AccountId"
+      DatabaseName: 'stocks_data'
+      TableInput:
+        Name: 'avg_return'
+        StorageDescriptor:
+          Columns:
+            - Name: 'date'
+              Type: 'date'
+            - Name: 'average_return'
+              Type: 'double'
+          Location: !Sub 's3://${GlueBucketName}/res/avg_return/'
+          InputFormat: 'org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat'
+          OutputFormat: 'org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat'
+          SerdeInfo:
+            SerializationLibrary: 'org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe'
+        TableType: 'EXTERNAL_TABLE'
+
+  MostTradedGlueTable:
+    Type: 'AWS::Glue::Table'
+    DependsOn: GlueDatabase
+    Properties:
+      CatalogId: !Ref "AWS::AccountId"
+      DatabaseName: 'stocks_data'
+      TableInput:
+        Name: 'most_traded'
+        StorageDescriptor:
+          Columns:
+            - Name: 'ticker'
+              Type: 'string'
+            - Name: 'frequency'
+              Type: 'double'
+          Location: !Sub 's3://${GlueBucketName}/res/most_traded/'
+          InputFormat: 'org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat'
+          OutputFormat: 'org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat'
+          SerdeInfo:
+            SerializationLibrary: 'org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe'
+        TableType: 'EXTERNAL_TABLE'
+
+  VolatileGlueTable:
+    Type: 'AWS::Glue::Table'
+    DependsOn: GlueDatabase
+    Properties:
+      CatalogId: !Ref "AWS::AccountId"
+      DatabaseName: 'stocks_data'
+      TableInput:
+        Name: 'volatile'
+        StorageDescriptor:
+          Columns:
+            - Name: 'ticker'
+              Type: 'string'
+            - Name: 'annualized_std'
+              Type: 'double'
+          Location: !Sub 's3://${GlueBucketName}/res/volatile/'
+          InputFormat: 'org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat'
+          OutputFormat: 'org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat'
+          SerdeInfo:
+            SerializationLibrary: 'org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe'
+        TableType: 'EXTERNAL_TABLE'
+
+  Top30DaysReturnGlueTable:
+    Type: 'AWS::Glue::Table'
+    DependsOn: GlueDatabase
+    Properties:
+      CatalogId: !Ref "AWS::AccountId"
+      DatabaseName: 'stocks_data'
+      TableInput:
+        Name: 'top_30_days_return'
+        StorageDescriptor:
+          Columns:
+            - Name: 'ticker'
+              Type: 'string'
+            - Name: 'date'
+              Type: 'date'
+          Location: !Sub 's3://${GlueBucketName}/res/top_30_days_return/'
+          InputFormat: 'org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat'
+          OutputFormat: 'org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat'
+          SerdeInfo:
+            SerializationLibrary: 'org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe'
+        TableType: 'EXTERNAL_TABLE'
+
+  AthenaWorkgroupConfiguration:
+    Type: 'AWS::Athena::WorkGroup'
+    Properties:
+      Name: 'athena-assignment-orib'
+      WorkGroupConfiguration:
+        ResultConfiguration:
+          OutputLocation: !Sub 's3://${GlueBucketName}/athena-results/'
 
 Outputs:
-    LambdaFunctionName:
-        Description: "Name of the Lambda function created"
-        Value: !Ref HelloWorldLambda
-    LambdaExecutionRoleArn:
-        Description: "ARN of the Lambda execution role"
-        Value: !GetAtt LambdaExecutionRole.Arn
+  GlueJobName:
+    Value: !Ref GlueJob
+  GlueBucketNameOutput:
+    Value: !Ref GlueBucketName
+
